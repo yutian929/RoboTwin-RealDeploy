@@ -6,7 +6,7 @@ import sapien.core as sapien
 import traceback
 import os
 import numpy as np
-from envs import *
+# from envs import *
 from hydra import initialize, compose
 from omegaconf import OmegaConf
 from hydra.core.hydra_config import HydraConfig

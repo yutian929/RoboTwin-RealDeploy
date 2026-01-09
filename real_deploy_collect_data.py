@@ -27,6 +27,7 @@ import pickle
 import pyrealsense2 as rs
 from copy import deepcopy
 import transforms3d as t3d
+import matplotlib.pyplot as plt
 
 # Hardware Interface
 # Note: Ensure this module is in your python path
@@ -87,6 +88,15 @@ class RoboTwinRealCollector:
         # Initialize Hardware
         self._init_arms()
         self._init_camera()
+        
+        # 3D Visualization setup
+        self.vis_pcd_fig = None
+        self.vis_pcd_ax = None
+        if self.args.vis_pcd:
+            plt.ion()
+            self.vis_pcd_fig = plt.figure(figsize=(8, 6))
+            self.vis_pcd_ax = self.vis_pcd_fig.add_subplot(111, projection='3d')
+            print(">>> 3D Visualization Enabled.")
         
         signal.signal(signal.SIGINT, self._signal_handler)
 
@@ -150,14 +160,16 @@ class RoboTwinRealCollector:
         print("\n[Signal] Exiting...")
         self.running = False
 
-    def _depth_to_pointcloud(self, depth_img, color_img, num_points=1024):
+    def _depth_to_pointcloud(self, depth_img, color_img, num_points=1024,
+                             xyz_range=None):
         """
-        Convert depth image to point cloud with colors.
+        Convert depth image to point cloud with colors and distance-based filtering.
         
         Args:
             depth_img: Raw depth image (uint16, in depth units)
             color_img: BGR color image (uint8)
             num_points: Number of points to sample (default 1024 for DP3)
+            xyz_range: Dict with keys 'x', 'y', 'z' containing [min, max] ranges
             
         Returns:
             pointcloud: (N, 6) array with [x, y, z, r, g, b] (rgb normalized to [0,1])
@@ -173,23 +185,45 @@ class RoboTwinRealCollector:
             indexing='ij'
         )
         
-        # Valid depth mask (filter out invalid depth values)
-        valid_mask = (depth_m > 0.1) & (depth_m < 2.0)  # 0.1m to 2m range
+        # Basic valid depth mask (filter out invalid depth values)
+        if xyz_range is None:
+            valid_mask = (depth_m > 0.1) & (depth_m < 2.0)  # Default 0.1m to 2m range
+        else:
+            z_min, z_max = xyz_range.get('z', [0.1, 2.0])
+            valid_mask = (depth_m > z_min) & (depth_m < z_max)
         
         # Back-project to 3D
         z = depth_m[valid_mask]
         x = (u[valid_mask] - self.cx) * z / self.fx
         y = (v[valid_mask] - self.cy) * z / self.fy
         
-        # Get pixel coordinates for visualization
+        # Get pixel coordinates
         pixel_u = u[valid_mask]
         pixel_v = v[valid_mask]
+        
+        # Apply XYZ range filtering if specified
+        if xyz_range is not None:
+            x_min, x_max = xyz_range.get('x', [-np.inf, np.inf])
+            y_min, y_max = xyz_range.get('y', [-np.inf, np.inf])
+            
+            range_mask = (x >= x_min) & (x <= x_max) & (y >= y_min) & (y <= y_max)
+            x = x[range_mask]
+            y = y[range_mask]
+            z = z[range_mask]
+            pixel_u = pixel_u[range_mask]
+            pixel_v = pixel_v[range_mask]
         
         # Get colors (convert BGR to RGB and normalize to [0,1])
         colors = color_img[valid_mask][:, ::-1].astype(np.float32) / 255.0
         
+        if len(x) > 0 and xyz_range is not None:
+            colors = colors[range_mask]
+        
         # Stack points
         points = np.stack([x, y, z], axis=-1)
+        # filtered_points_3d = points.copy() # No longer needed
+        
+        colors = colors.astype(np.float32)
         pointcloud = np.hstack([points, colors])
         pixel_coords = np.stack([pixel_u, pixel_v], axis=-1)
         
@@ -209,15 +243,37 @@ class RoboTwinRealCollector:
             sampled_pixel_coords = pixel_coords
         
         return pointcloud.astype(np.float32), sampled_pixel_coords
+    
+    def _update_3d_pointcloud_vis(self, pointcloud):
+        """Update the 3D matplotlib visualization with sampled pointcloud."""
+        if self.vis_pcd_ax is None:
+            return
 
-    def _create_pointcloud_visualization(self, color_img, sampled_pixel_coords):
-        """Create a visualization image showing sampled point cloud points on the RGB image."""
-        vis_img = color_img.copy()
-        if sampled_pixel_coords is not None and len(sampled_pixel_coords) > 0:
-            for u, v in sampled_pixel_coords.astype(int):
-                if 0 <= u < self.img_width and 0 <= v < self.img_height:
-                    cv2.circle(vis_img, (u, v), 1, (0, 255, 0), -1)  # Green dots
-        return vis_img
+        xyz = pointcloud[:, :3]
+        rgb = pointcloud[:, 3:]
+        
+        # Filter out padding zeros
+        valid = ~np.all(xyz == 0, axis=1)
+        xyz = xyz[valid]
+        rgb = rgb[valid]
+        
+        if len(xyz) == 0:
+            return
+
+        self.vis_pcd_ax.clear()
+        
+        self.vis_pcd_ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], c=rgb, s=20, marker='.')
+        
+        self.vis_pcd_ax.set_xlabel('X')
+        self.vis_pcd_ax.set_ylabel('Y')
+        self.vis_pcd_ax.set_zlabel('Z')
+        
+        # Use ranges from args to fix view
+        self.vis_pcd_ax.set_xlim(self.args.x_range)
+        self.vis_pcd_ax.set_ylim(self.args.y_range)
+        self.vis_pcd_ax.set_zlim(self.args.z_range)
+        
+        plt.pause(0.001)
 
     def _matrix_to_pose7(self, T):
         """Convert 4x4 transformation matrix to 7-element pose [x,y,z,qw,qx,qy,qz]."""
@@ -334,21 +390,30 @@ class RoboTwinRealCollector:
                 color_img = np.asanyarray(color_frame.get_data()) # BGR for cv2
                 depth_img = np.asanyarray(depth_frame.get_data()) # mm
 
-                # Get current robot state for visualization
+        # Get current robot state for visualization
                 with self.state_lock:
                     state = deepcopy(self.current_state)
                 
-                # Generate point cloud for visualization
+                # Define xyz range for filtering (adjust these values based on your workspace)
+                xyz_range = {
+                    'x': self.args.x_range,
+                    'y': self.args.y_range,
+                    'z': self.args.z_range
+                }
+                
+                # Generate point cloud with distance-based filtering
                 pointcloud, sampled_pixel_coords = self._depth_to_pointcloud(
-                    depth_img, color_img, num_points=self.args.pcd_num_points
+                    depth_img, color_img, num_points=self.args.pcd_num_points, 
+                    xyz_range=xyz_range
                 )
+                
+                # Update 3D visualization if enabled
+                if self.args.vis_pcd:
+                    self._update_3d_pointcloud_vis(pointcloud)
                 
                 # 2. Create visualization panels
                 # Main camera view with overlays
                 display_img = color_img.copy()
-                
-                # Point cloud visualization (sampled points on image)
-                pcd_vis_img = self._create_pointcloud_visualization(color_img, sampled_pixel_coords)
                 
                 # Add status overlays to main display
                 y_offset = 30
@@ -365,37 +430,28 @@ class RoboTwinRealCollector:
                     cv2.putText(display_img, f"IDLE | Next Episode: {self.current_episode_idx}",
                                 (20, y_offset + 5), font, font_scale, (0, 255, 0), 2)
                 
-                # Left arm 7D pose (position + quaternion)
+                # Left arm Joint Angles (6-dim)
                 y_offset += line_height + 10
-                pose_L = state["pose_L"]
-                cv2.putText(display_img, f"L Pose: [{pose_L[0]:.3f}, {pose_L[1]:.3f}, {pose_L[2]:.3f}]",
-                            (20, y_offset), font, font_scale, (255, 200, 0), 1)
-                y_offset += line_height
-                cv2.putText(display_img, f"L Quat: [{pose_L[3]:.3f}, {pose_L[4]:.3f}, {pose_L[5]:.3f}, {pose_L[6]:.3f}]",
+                qpos_L = state["qpos_L"]
+                
+                # Display first 3 joints
+                cv2.putText(display_img, f"L J[0:6]: [{qpos_L[0]:.2f}, {qpos_L[1]:.2f}, {qpos_L[2]:.2f}, {qpos_L[3]:.2f}, {qpos_L[4]:.2f}, {qpos_L[5]:.2f}]",
                             (20, y_offset), font, font_scale, (255, 200, 0), 1)
                 y_offset += line_height
                 cv2.putText(display_img, f"L Grip: {state['width_L']:.3f}",
                             (20, y_offset), font, font_scale, (255, 200, 0), 1)
                 
-                # Right arm 7D pose
+                # Right arm Joint Angles
                 y_offset += line_height + 5
-                pose_R = state["pose_R"]
-                cv2.putText(display_img, f"R Pose: [{pose_R[0]:.3f}, {pose_R[1]:.3f}, {pose_R[2]:.3f}]",
-                            (20, y_offset), font, font_scale, (0, 200, 255), 1)
-                y_offset += line_height
-                cv2.putText(display_img, f"R Quat: [{pose_R[3]:.3f}, {pose_R[4]:.3f}, {pose_R[5]:.3f}, {pose_R[6]:.3f}]",
+                qpos_R = state["qpos_R"]
+                cv2.putText(display_img, f"R J[0:6]: [{qpos_R[0]:.2f}, {qpos_R[1]:.2f}, {qpos_R[2]:.2f}, {qpos_R[3]:.2f}, {qpos_R[4]:.2f}, {qpos_R[5]:.2f}]",
                             (20, y_offset), font, font_scale, (0, 200, 255), 1)
                 y_offset += line_height
                 cv2.putText(display_img, f"R Grip: {state['width_R']:.3f}",
                             (20, y_offset), font, font_scale, (0, 200, 255), 1)
                 
-                # Point cloud info on pcd visualization
-                cv2.putText(pcd_vis_img, f"Point Cloud: {self.args.pcd_num_points} pts",
-                            (20, 30), font, font_scale, (0, 255, 0), 1)
-                
                 # Show both windows
                 cv2.imshow("RealSense Feed", display_img)
-                cv2.imshow("Point Cloud Sampling", pcd_vis_img)
 
                 # 3. Recording Logic
                 if self.is_recording:
@@ -475,8 +531,14 @@ def main():
     parser.add_argument('--freq', type=float, default=50.0, help='Control loop frequency (Hz)')
     parser.add_argument('--record_freq', type=float, default=30.0, help='Data recording frequency (Hz)')
     parser.add_argument('--gripper_max_width', type=float, default=0.08, help='Max gripper width in meters for normalization')
-    parser.add_argument('--pcd_num_points', type=int, default=1024, help='Number of points in point cloud')
+    parser.add_argument('--pcd_num_points', type=int, default=4096, help='Number of points in point cloud')
     
+    # Point cloud filtering ranges
+    parser.add_argument('--x_range', type=float, nargs=2, default=[0.0, 0.4], help='X range for point cloud filtering (min max)')
+    parser.add_argument('--y_range', type=float, nargs=2, default=[-0.2, 0.3], help='Y range for point cloud filtering (min max)')
+    parser.add_argument('--z_range', type=float, nargs=2, default=[0.1, 1.0], help='Z range for point cloud filtering (min max)')
+    parser.add_argument('--vis_pcd', action='store_true', help='Enable real-time 3D point cloud visualization')
+
     args = parser.parse_args()
     
     collector = RoboTwinRealCollector(args)

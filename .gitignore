@@ -1,6 +1,8 @@
 models/
 data/*
 !data/process_stuck.py
+!data/check_pkl.py
+!data/check_hdf5.py
 __pycache__/
 **/checkpoints/
 result/
