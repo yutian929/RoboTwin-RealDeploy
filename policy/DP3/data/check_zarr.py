@@ -5,7 +5,7 @@ from mpl_toolkits.mplot3d import Axes3D
 import os
 
 # 默认路径，根据您的上下文推断
-default_path = "20260109dp3-cut4096pts-20.zarr"
+default_path = "/home/yutian/projs/RoboTwin-RealDeploy/policy/DP3/data/FuckingDP3-2048pts-20.zarr"
 
 def visualize_zarr(file_path):
     if not os.path.exists(file_path):

@@ -110,7 +110,7 @@ def create_hdf5_from_dict(hdf5_group, data_dict):
                 hdf5_group.create_dataset(key, data=value)
 
 
-def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
+def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path, target_points=None):
     """Convert PKL files to HDF5 and video."""
     # Parse structure from first file
     data_list = parse_dict_structure(load_pkl_file(pkl_files[0]))
@@ -118,6 +118,17 @@ def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
     # Accumulate all data
     for pkl_file_path in pkl_files:
         pkl_file = load_pkl_file(pkl_file_path)
+        
+        # Downsample pointcloud if needed
+        if target_points is not None and "pointcloud" in pkl_file:
+            pc = pkl_file["pointcloud"]
+            if len(pc) > target_points:
+                indices = np.random.choice(len(pc), target_points, replace=False)
+                # Sort indices to keep some temporal coherence if it mattered (it doesn't for points)
+                # but sorting is good practice for determinism if seeded. 
+                # Here we strictly follow random choice.
+                pkl_file["pointcloud"] = pc[indices]
+
         append_data_to_structure(data_list, pkl_file)
     
     # Create video from RGB images
@@ -131,7 +142,7 @@ def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
     print(f"  HDF5 saved: {hdf5_path}")
 
 
-def process_folder_to_hdf5_video(folder_path, hdf5_path, video_path):
+def process_folder_to_hdf5_video(folder_path, hdf5_path, video_path, target_points=None):
     """Process a folder of PKL files to HDF5 and video."""
     # Find all PKL files with numeric names
     pkl_files = []
@@ -155,7 +166,7 @@ def process_folder_to_hdf5_video(folder_path, hdf5_path, video_path):
         expected += 1
     
     print(f"  Found {len(pkl_files)} frames")
-    pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path)
+    pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path, target_points=target_points)
 
 
 def main():
@@ -166,11 +177,17 @@ def main():
                         help='Task config name (default: default)')
     parser.add_argument('--data_root', type=str, default='./data/real_data_robotwin_collected',
                         help='Root directory containing episode folders')
+    parser.add_argument('--target_points', type=int, default=None,
+                        help='Downsample point cloud to this number of points (e.g., 2048). Default: No downsampling.')
     args = parser.parse_args()
     
     task_name = args.task_name
     task_config = args.task_config
     data_root = args.data_root
+    target_points = args.target_points
+    
+    if target_points is not None:
+        print(f">>> Usage of downsampling: Target {target_points} points.")
     
     # Output directory structure: ./data/{task_name}/{task_config}/
     output_dir = f"./data/{task_name}/{task_config}"
@@ -202,7 +219,7 @@ def main():
         
         print(f"\n[{i+1}/{num_episodes}] Converting {ep_dir} -> episode{i}")
         try:
-            process_folder_to_hdf5_video(ep_path, hdf5_path, video_path)
+            process_folder_to_hdf5_video(ep_path, hdf5_path, video_path, target_points=target_points)
         except Exception as e:
             print(f"  Error: {e}")
             continue

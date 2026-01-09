@@ -4,7 +4,7 @@ import cv2
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-file_path = "20260109_dp3/4096pts/data/episode0.hdf5"
+file_path = "/home/yutian/projs/RoboTwin-RealDeploy/data/FuckingDP3/2048pts/data/episode0.hdf5"
 
 def visualize_hdf5(file_path):
     print(f"Checking HDF5 file: {file_path}")

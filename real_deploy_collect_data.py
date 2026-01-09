@@ -98,7 +98,63 @@ class RoboTwinRealCollector:
             self.vis_pcd_ax = self.vis_pcd_fig.add_subplot(111, projection='3d')
             print(">>> 3D Visualization Enabled.")
         
+        self._init_sliders()
+        
         signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _init_sliders(self):
+        cv2.namedWindow("Settings", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Settings", 400, 400)
+        
+        # Helper to convert meter to trackbar value (mm + offset)
+        # Range -2.5m to 2.5m -> 5000mm span. 
+        # Trackbar 0-5000. offset 2500.
+        self.slider_offset = 2500
+        self.slider_scale = 1000.0
+        
+        def nothing(x): pass
+        
+        # Initial values from args
+        x_min_val = int(self.args.x_range[0] * self.slider_scale + self.slider_offset)
+        x_max_val = int(self.args.x_range[1] * self.slider_scale + self.slider_offset)
+        y_min_val = int(self.args.y_range[0] * self.slider_scale + self.slider_offset)
+        y_max_val = int(self.args.y_range[1] * self.slider_scale + self.slider_offset)
+        z_min_val = int(self.args.z_range[0] * self.slider_scale + self.slider_offset)
+        z_max_val = int(self.args.z_range[1] * self.slider_scale + self.slider_offset)
+        
+        cv2.createTrackbar("X Min (mm)", "Settings", x_min_val, 5000, nothing)
+        cv2.createTrackbar("X Max (mm)", "Settings", x_max_val, 5000, nothing)
+        cv2.createTrackbar("Y Min (mm)", "Settings", y_min_val, 5000, nothing)
+        cv2.createTrackbar("Y Max (mm)", "Settings", y_max_val, 5000, nothing)
+        cv2.createTrackbar("Z Min (mm)", "Settings", z_min_val, 5000, nothing)
+        cv2.createTrackbar("Z Max (mm)", "Settings", z_max_val, 5000, nothing)
+
+    def _get_slider_values(self):
+        try:
+            x_min = (cv2.getTrackbarPos("X Min (mm)", "Settings") - self.slider_offset) / self.slider_scale
+            x_max = (cv2.getTrackbarPos("X Max (mm)", "Settings") - self.slider_offset) / self.slider_scale
+            y_min = (cv2.getTrackbarPos("Y Min (mm)", "Settings") - self.slider_offset) / self.slider_scale
+            y_max = (cv2.getTrackbarPos("Y Max (mm)", "Settings") - self.slider_offset) / self.slider_scale
+            z_min = (cv2.getTrackbarPos("Z Min (mm)", "Settings") - self.slider_offset) / self.slider_scale
+            z_max = (cv2.getTrackbarPos("Z Max (mm)", "Settings") - self.slider_offset) / self.slider_scale
+            
+            # Show the actual values on the setting image
+            setting_img = np.zeros((300, 500, 3), dtype=np.uint8)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cv2.putText(setting_img, "Copy these to launch args:", (10, 30), font, 0.6, (255, 255, 255), 1)
+            cv2.putText(setting_img, f"--x_range {x_min:.4f} {x_max:.4f}", (10, 70), font, 0.5, (0, 255, 0), 1)
+            cv2.putText(setting_img, f"--y_range {y_min:.4f} {y_max:.4f}", (10, 110), font, 0.5, (0, 255, 0), 1)
+            cv2.putText(setting_img, f"--z_range {z_min:.4f} {z_max:.4f}", (10, 150), font, 0.5, (0, 255, 0), 1)
+            
+            cv2.imshow("Settings", setting_img)
+            
+            return {'x': [x_min, x_max], 'y': [y_min, y_max], 'z': [z_min, z_max]}
+        except:
+             return {
+                'x': self.args.x_range,
+                'y': self.args.y_range,
+                'z': self.args.z_range
+             }
 
     def _init_arms(self):
         print(">>> Initializing ARX Arms...")
@@ -200,6 +256,9 @@ class RoboTwinRealCollector:
         # Get pixel coordinates
         pixel_u = u[valid_mask]
         pixel_v = v[valid_mask]
+
+        # Get colors (convert BGR to RGB and normalize to [0,1])
+        colors = color_img[valid_mask][:, ::-1].astype(np.float32) / 255.0
         
         # Apply XYZ range filtering if specified
         if xyz_range is not None:
@@ -212,11 +271,6 @@ class RoboTwinRealCollector:
             z = z[range_mask]
             pixel_u = pixel_u[range_mask]
             pixel_v = pixel_v[range_mask]
-        
-        # Get colors (convert BGR to RGB and normalize to [0,1])
-        colors = color_img[valid_mask][:, ::-1].astype(np.float32) / 255.0
-        
-        if len(x) > 0 and xyz_range is not None:
             colors = colors[range_mask]
         
         # Stack points
@@ -267,6 +321,7 @@ class RoboTwinRealCollector:
         self.vis_pcd_ax.set_xlabel('X')
         self.vis_pcd_ax.set_ylabel('Y')
         self.vis_pcd_ax.set_zlabel('Z')
+        self.vis_pcd_ax.set_title(f"Sampled Points: {len(xyz)}")
         
         # Use ranges from args to fix view
         self.vis_pcd_ax.set_xlim(self.args.x_range)
@@ -390,16 +445,12 @@ class RoboTwinRealCollector:
                 color_img = np.asanyarray(color_frame.get_data()) # BGR for cv2
                 depth_img = np.asanyarray(depth_frame.get_data()) # mm
 
-        # Get current robot state for visualization
+                # Get current robot state for visualization
                 with self.state_lock:
                     state = deepcopy(self.current_state)
                 
-                # Define xyz range for filtering (adjust these values based on your workspace)
-                xyz_range = {
-                    'x': self.args.x_range,
-                    'y': self.args.y_range,
-                    'z': self.args.z_range
-                }
+                # Get dynamic range from sliders
+                xyz_range = self._get_slider_values()
                 
                 # Generate point cloud with distance-based filtering
                 pointcloud, sampled_pixel_coords = self._depth_to_pointcloud(
@@ -531,12 +582,12 @@ def main():
     parser.add_argument('--freq', type=float, default=50.0, help='Control loop frequency (Hz)')
     parser.add_argument('--record_freq', type=float, default=30.0, help='Data recording frequency (Hz)')
     parser.add_argument('--gripper_max_width', type=float, default=0.08, help='Max gripper width in meters for normalization')
-    parser.add_argument('--pcd_num_points', type=int, default=4096, help='Number of points in point cloud')
+    parser.add_argument('--pcd_num_points', type=int, default=2048, help='Number of points in point cloud')
     
     # Point cloud filtering ranges
-    parser.add_argument('--x_range', type=float, nargs=2, default=[0.0, 0.4], help='X range for point cloud filtering (min max)')
-    parser.add_argument('--y_range', type=float, nargs=2, default=[-0.2, 0.3], help='Y range for point cloud filtering (min max)')
-    parser.add_argument('--z_range', type=float, nargs=2, default=[0.1, 1.0], help='Z range for point cloud filtering (min max)')
+    parser.add_argument('--x_range', type=float, nargs=2, default=[-0.1940, 0.1570], help='X range for point cloud filtering (min max)')
+    parser.add_argument('--y_range', type=float, nargs=2, default=[-0.0380, 0.0870], help='Y range for point cloud filtering (min max)')
+    parser.add_argument('--z_range', type=float, nargs=2, default=[0.5930, 0.9600], help='Z range for point cloud filtering (min max)')
     parser.add_argument('--vis_pcd', action='store_true', help='Enable real-time 3D point cloud visualization')
 
     args = parser.parse_args()
